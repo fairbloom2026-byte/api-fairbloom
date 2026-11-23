@@ -53,13 +53,17 @@ const listingSchema = new mongoose.Schema(
       default: "active",
     },
 
-    // Admin moderation: a new listing stays off the marketplace until an admin approves it.
-    // Listings created before moderation existed have no value and count as approved.
+    // Price check: a listing priced more than PRICE_DEVIATION_THRESHOLD_PERCENT above or below
+    // the variety's VWAP is flagged ("pending") and stays off the marketplace until an admin
+    // approves it. Everything else goes live at once ("approved").
     reviewStatus: {
       type: String,
       enum: ["pending", "approved", "rejected"],
-      default: "pending",
+      default: "approved",
     },
+    // Signed % from the VWAP when last checked (positive = above). null = no price or no index.
+    priceDeviationPercent: { type: Number, default: null },
+    marketVwapAtCheck: { type: Number, default: null },
     reviewNote: { type: String, trim: true, maxlength: 300 },
     reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     reviewedAt: { type: Date, default: null },

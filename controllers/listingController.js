@@ -7,17 +7,36 @@ const { processImage } = require("../utils/imageService");
 const { getVwapMap } = require("../utils/priceIndex");
 const { DEFAULT_WINDOW_DAYS } = require("../utils/vwap");
 const { notifyAdmins } = require("../utils/notify");
+const { checkListingPrice, describeDeviation } = require("../utils/listingPriceCheck");
 
 const isLive = (listing) => !["pending", "rejected"].includes(listing.reviewStatus);
 
-/** Tells admins a listing is waiting in the review queue. */
-const announcePending = (listing, poster, resubmitted = false) =>
+/** Tells admins a listing was held back because its price is far from the market. */
+const announceFlagged = (listing, poster) =>
   notifyAdmins({
     type: "listing_pending",
-    title: resubmitted ? "Listing resubmitted for review" : "New listing to review",
-    body: `${poster.name} (${poster.role}) posted ${listing.flowerVariety}, ${listing.quantity} dozen in ${listing.location}`,
+    title: "Listing flagged for price review",
+    body: `${poster.name} (${poster.role}) listed ${listing.flowerVariety} at ₱${listing.pricePerUnit}/dozen, ${describeDeviation(listing.priceDeviationPercent)} the market price (₱${listing.marketVwapAtCheck})`,
     listing: listing._id,
   });
+
+/**
+ * Runs the price check and sets the listing's review state: flagged ("pending") when the
+ * price is too far from the VWAP, otherwise live ("approved"). Returns the check result.
+ */
+async function applyPriceCheck(listing) {
+  const check = await checkListingPrice(listing.flowerVariety, listing.pricePerUnit);
+  listing.priceDeviationPercent = check.deviationPercent;
+  listing.marketVwapAtCheck = check.vwap;
+  listing.reviewStatus = check.flagged ? "pending" : "approved";
+  listing.reviewNote = undefined;
+  listing.reviewedBy = null;
+  listing.reviewedAt = null;
+  return check;
+}
+
+const flaggedMessage = (check) =>
+  `Your price is ${describeDeviation(check.deviationPercent)} the market price (₱${check.vwap} per dozen), so an admin will review this listing before it goes live.`;
 
 // Allow-list: only these sort keys are accepted from the query string.
 const SORTS = {
@@ -101,7 +120,7 @@ const createListing = async (req, res) => {
       await File.create({ _id: fileId, owner: req.user._id, kind: "listing", ...processed });
     }
 
-    const listing = await Listing.create({
+    const listing = new Listing({
       postedBy: req.user._id,
       type,
       flowerVariety,
@@ -110,14 +129,16 @@ const createListing = async (req, res) => {
       location,
       description,
       image: fileId,
-      reviewStatus: "pending",
     });
+    const check = await applyPriceCheck(listing);
+    await listing.save();
 
-    announcePending(listing, req.user);
+    if (check.flagged) announceFlagged(listing, req.user);
 
     res.status(201).json({
       listing: shape(listing),
-      message: "Listing submitted. It will appear in the marketplace once an admin approves it.",
+      priceCheck: check,
+      message: check.flagged ? flaggedMessage(check) : "Your listing is live.",
     });
   } catch (err) {
     if (fileId) await File.deleteOne({ _id: fileId }).catch(() => {}); // don't leave an orphaned photo
@@ -130,7 +151,7 @@ const createListing = async (req, res) => {
 /**
  * @route   GET /api/listings
  * @desc    Query: type, flowerVariety, location, status, sort, page, limit.
- *          Only admin-approved listings are returned. With mine=true (signed in), returns the
+ *          Listings flagged by the price check (pending) or rejected are left out. With mine=true (signed in), returns the
  *          caller's own listings in every review state; reviewStatus then narrows them.
  * @access  Public (mine=true needs a token)
  */
@@ -252,34 +273,33 @@ const updateListing = async (req, res) => {
       listing.image = null;
     }
 
-    // Back to the review queue when a rejected listing is edited, or when an approved
-    // listing's admin-checked content changes (photo, description, asking price).
-    // Quantity and status updates (e.g. marking it fulfilled) don't need another review.
-    const contentChanged = ["description", "pricePerUnit", "image"].some((f) =>
+    // Re-run the price check when the price changes, or when a rejected listing is edited
+    // (that's how it gets resubmitted). Within range it goes live; too far off, it's flagged.
+    // Other edits (photo, description, quantity, status) never need admin review.
+    const edited = ["description", "pricePerUnit", "image", "quantity"].some((f) =>
       listing.isModified(f)
     );
-    const edited = contentChanged || listing.isModified("quantity");
-    const resubmitted =
+    const recheck =
       listing.status === "active" &&
-      ((listing.reviewStatus === "rejected" && edited) ||
-        (listing.reviewStatus === "approved" && contentChanged));
-    if (resubmitted) {
-      listing.reviewStatus = "pending";
-      listing.reviewNote = undefined;
-      listing.reviewedBy = null;
-      listing.reviewedAt = null;
-    }
+      (listing.isModified("pricePerUnit") || (listing.reviewStatus === "rejected" && edited));
+    const wasFlagged = listing.reviewStatus === "pending";
+    const check = recheck ? await applyPriceCheck(listing) : null;
 
     await listing.save();
 
-    if (resubmitted) announcePending(listing, req.user, true);
+    // Tell admins only when it newly lands in the queue.
+    if (check?.flagged && !wasFlagged) announceFlagged(listing, req.user);
 
     // Only delete the previous photo after the new state is safely saved.
     if (oldImage && String(oldImage) !== String(listing.image)) {
       await File.deleteOne({ _id: oldImage }).catch(() => {});
     }
 
-    res.json({ listing: shape(listing) });
+    res.json({
+      listing: shape(listing),
+      ...(check ? { priceCheck: check } : {}),
+      ...(check?.flagged ? { message: flaggedMessage(check) } : {}),
+    });
   } catch (err) {
     if (newFileId) await File.deleteOne({ _id: newFileId }).catch(() => {});
     if (err.name === "ValidationError") return res.status(400).json({ message: err.message });

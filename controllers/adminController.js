@@ -319,8 +319,10 @@ const reviewVerification = async (req, res) => {
 
 /**
  * @route   GET /api/admin/listings
- * @desc    The listing review queue. Query: reviewStatus (pending|approved|rejected,
- *          default pending), page, limit. Pending is oldest first; the others newest first.
+ * @desc    The flagged-listing queue (listings priced too far from the VWAP). Query:
+ *          reviewStatus (pending|approved|rejected, default pending), page, limit.
+ *          "approved" lists only listings an admin approved, not every live listing.
+ *          Pending is oldest first; the others newest first.
  * @access  Private (admin only)
  */
 const listListingReviews = async (req, res) => {
@@ -331,7 +333,10 @@ const listListingReviews = async (req, res) => {
     const page = Math.max(Number(req.query.page) || 1, 1);
     const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
 
-    const filter = reviewStatus === "approved" ? { ...Listing.LIVE_FILTER } : { reviewStatus };
+    const filter =
+      reviewStatus === "approved"
+        ? { reviewStatus, reviewedAt: { $ne: null } } // approved by an admin
+        : { reviewStatus };
     const sort = reviewStatus === "pending" ? { createdAt: 1 } : { reviewedAt: -1, createdAt: -1 };
 
     const [rows, total] = await Promise.all([
@@ -385,7 +390,7 @@ const reviewListing = async (req, res) => {
       title: approved ? "Listing approved" : "Listing not approved",
       body: approved
         ? `Your ${listing.flowerVariety} listing is now live in the marketplace.`
-        : `Your ${listing.flowerVariety} listing wasn't approved. Reason: ${reason}. Edit it to resubmit.`,
+        : `Your ${listing.flowerVariety} listing wasn't approved. Reason: ${reason}. Change the price to make it live again.`,
       listing: listing._id,
     });
 

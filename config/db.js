@@ -15,6 +15,8 @@ async function backfillListingReview() {
   } catch (err) {
     console.error("[FairBloom] Listing review backfill failed:", err.message);
   }
+  // Lazy require: the model and price index load only after mongoose is connected.
+  await require("../utils/listingPriceCheck").recheckUnpricedPending();
 }
 
 const connectDB = async () => {
