@@ -4,7 +4,7 @@ const PushToken = require("../models/PushToken");
 const { getIO } = require("./socket");
 
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
-const REFS = ["conversation", "deal", "transaction", "subject"];
+const REFS = ["conversation", "deal", "transaction", "subject", "listing"];
 
 async function sendPush(userId, { title, body, data }) {
   const tokens = await PushToken.find({ user: userId }).lean();

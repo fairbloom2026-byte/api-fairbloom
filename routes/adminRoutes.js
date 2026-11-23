@@ -9,6 +9,8 @@ const {
   eraseUserByAdmin,
   listVerifications,
   reviewVerification,
+  listListingReviews,
+  reviewListing,
 } = require("../controllers/adminController");
 const {
   userStatusValidation,
@@ -27,6 +29,10 @@ router.post("/users/:id/erase", adminEraseValidation, eraseUserByAdmin);
 
 router.get("/verifications", listVerifications);
 router.patch("/users/:id/verification", verificationDecisionValidation, reviewVerification);
+
+// Listing moderation: same { decision, reason } body as verification.
+router.get("/listings", listListingReviews);
+router.patch("/listings/:id/review", verificationDecisionValidation, reviewListing);
 
 router.get("/backup", downloadBackup);
 

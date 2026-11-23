@@ -44,4 +44,25 @@ const authorize = (...allowedRoles) => {
   };
 };
 
-module.exports = { protect, authorize };
+/**
+ * Sets req.user when a valid token is sent, and carries on as a guest otherwise.
+ * For public routes that show more to a signed-in owner or admin.
+ */
+const optionalAuth = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return next();
+  try {
+    const decoded = jwt.verify(authHeader.split(" ")[1], process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id);
+    const stale =
+      user &&
+      user.passwordChangedAt &&
+      decoded.iat < Math.floor(user.passwordChangedAt.getTime() / 1000);
+    if (user && user.isActive && !stale) req.user = user;
+  } catch {
+    // A bad or expired token on a public route just means "guest".
+  }
+  next();
+};
+
+module.exports = { protect, authorize, optionalAuth };

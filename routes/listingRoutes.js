@@ -10,7 +10,7 @@ const {
   deleteListing,
 } = require("../controllers/listingController");
 const { listingValidation } = require("../middleware/validators");
-const { protect, authorize } = require("../middleware/auth");
+const { protect, authorize, optionalAuth } = require("../middleware/auth");
 const requireApproved = require("../middleware/requireApproved");
 const { uploadImage } = require("../middleware/upload");
 
@@ -25,8 +25,9 @@ const imageLimiter = rateLimit({
   message: { message: "You're uploading photos too quickly. Please wait a few minutes." },
 });
 
-router.get("/", getListings);
-router.get("/:id", getListingById);
+// Public, but a token lets owners see their own listings that are still awaiting review.
+router.get("/", optionalAuth, getListings);
+router.get("/:id", optionalAuth, getListingById);
 
 // uploadImage runs BEFORE the validators so multipart form fields are parsed first.
 router.post(

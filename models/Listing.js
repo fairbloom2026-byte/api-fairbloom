@@ -52,11 +52,28 @@ const listingSchema = new mongoose.Schema(
       enum: ["active", "fulfilled", "cancelled"],
       default: "active",
     },
+
+    // Admin moderation: a new listing stays off the marketplace until an admin approves it.
+    // Listings created before moderation existed have no value and count as approved.
+    reviewStatus: {
+      type: String,
+      enum: ["pending", "approved", "rejected"],
+      default: "pending",
+    },
+    reviewNote: { type: String, trim: true, maxlength: 300 },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    reviewedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
 
 // Supports the "Search and Filter" requirement: by flower type, location, status
 listingSchema.index({ flowerVariety: 1, location: 1, status: 1 });
+listingSchema.index({ reviewStatus: 1, createdAt: 1 });
+
+// Query fragment for listings the public may see: approved, or older listings with no review status.
+listingSchema.statics.LIVE_FILTER = Object.freeze({
+  reviewStatus: { $nin: ["pending", "rejected"] },
+});
 
 module.exports = mongoose.model("Listing", listingSchema);

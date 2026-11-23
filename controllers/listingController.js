@@ -6,6 +6,18 @@ const escapeRegex = require("../utils/escapeRegex");
 const { processImage } = require("../utils/imageService");
 const { getVwapMap } = require("../utils/priceIndex");
 const { DEFAULT_WINDOW_DAYS } = require("../utils/vwap");
+const { notifyAdmins } = require("../utils/notify");
+
+const isLive = (listing) => !["pending", "rejected"].includes(listing.reviewStatus);
+
+/** Tells admins a listing is waiting in the review queue. */
+const announcePending = (listing, poster, resubmitted = false) =>
+  notifyAdmins({
+    type: "listing_pending",
+    title: resubmitted ? "Listing resubmitted for review" : "New listing to review",
+    body: `${poster.name} (${poster.role}) posted ${listing.flowerVariety}, ${listing.quantity} dozen in ${listing.location}`,
+    listing: listing._id,
+  });
 
 // Allow-list: only these sort keys are accepted from the query string.
 const SORTS = {
@@ -98,9 +110,15 @@ const createListing = async (req, res) => {
       location,
       description,
       image: fileId,
+      reviewStatus: "pending",
     });
 
-    res.status(201).json({ listing: shape(listing) });
+    announcePending(listing, req.user);
+
+    res.status(201).json({
+      listing: shape(listing),
+      message: "Listing submitted. It will appear in the marketplace once an admin approves it.",
+    });
   } catch (err) {
     if (fileId) await File.deleteOne({ _id: fileId }).catch(() => {}); // don't leave an orphaned photo
     if (err.name === "ValidationError") return res.status(400).json({ message: err.message });
@@ -111,16 +129,31 @@ const createListing = async (req, res) => {
 
 /**
  * @route   GET /api/listings
- * @desc    Query: type, flowerVariety, location, status, sort, page, limit
- * @access  Public
+ * @desc    Query: type, flowerVariety, location, status, sort, page, limit.
+ *          Only admin-approved listings are returned. With mine=true (signed in), returns the
+ *          caller's own listings in every review state; reviewStatus then narrows them.
+ * @access  Public (mine=true needs a token)
  */
 const getListings = async (req, res) => {
   try {
     const { type, flowerVariety, location, status = "active", sort = "newest" } = req.query;
     const page = Math.max(Number(req.query.page) || 1, 1);
     const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+    const mine = req.query.mine === "true";
+
+    if (mine && !req.user) {
+      return res.status(401).json({ message: "Sign in to see your own listings" });
+    }
 
     const filter = {};
+    if (mine) {
+      filter.postedBy = req.user._id;
+      const { reviewStatus } = req.query;
+      if (reviewStatus === "approved") Object.assign(filter, Listing.LIVE_FILTER);
+      else if (["pending", "rejected"].includes(reviewStatus)) filter.reviewStatus = reviewStatus;
+    } else {
+      Object.assign(filter, Listing.LIVE_FILTER);
+    }
     if (type) filter.type = String(type);
     if (location) filter.location = String(location);
     if (status) filter.status = String(status);
@@ -152,7 +185,7 @@ const getListings = async (req, res) => {
 
 /**
  * @route   GET /api/listings/:id
- * @access  Public
+ * @access  Public. A listing not yet approved is visible only to its poster and admins.
  */
 const getListingById = async (req, res) => {
   try {
@@ -161,6 +194,14 @@ const getListingById = async (req, res) => {
       .lean();
 
     if (!row) return res.status(404).json({ message: "Listing not found" });
+
+    if (!isLive(row)) {
+      const viewer = req.user;
+      const isOwner = viewer && row.postedBy && String(row.postedBy._id) === String(viewer._id);
+      if (!isOwner && viewer?.role !== "admin") {
+        return res.status(404).json({ message: "Listing not found" });
+      }
+    }
 
     const [listing] = await attachMarketPrice([row]);
     res.json({ listing });
@@ -211,7 +252,27 @@ const updateListing = async (req, res) => {
       listing.image = null;
     }
 
+    // Back to the review queue when a rejected listing is edited, or when an approved
+    // listing's admin-checked content changes (photo, description, asking price).
+    // Quantity and status updates (e.g. marking it fulfilled) don't need another review.
+    const contentChanged = ["description", "pricePerUnit", "image"].some((f) =>
+      listing.isModified(f)
+    );
+    const edited = contentChanged || listing.isModified("quantity");
+    const resubmitted =
+      listing.status === "active" &&
+      ((listing.reviewStatus === "rejected" && edited) ||
+        (listing.reviewStatus === "approved" && contentChanged));
+    if (resubmitted) {
+      listing.reviewStatus = "pending";
+      listing.reviewNote = undefined;
+      listing.reviewedBy = null;
+      listing.reviewedAt = null;
+    }
+
     await listing.save();
+
+    if (resubmitted) announcePending(listing, req.user, true);
 
     // Only delete the previous photo after the new state is safely saved.
     if (oldImage && String(oldImage) !== String(listing.image)) {
