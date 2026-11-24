@@ -6,37 +6,6 @@ const escapeRegex = require("../utils/escapeRegex");
 const { processImage } = require("../utils/imageService");
 const { getVwapMap } = require("../utils/priceIndex");
 const { DEFAULT_WINDOW_DAYS } = require("../utils/vwap");
-const { notifyAdmins } = require("../utils/notify");
-const { checkListingPrice, describeDeviation } = require("../utils/listingPriceCheck");
-
-const isLive = (listing) => !["pending", "rejected"].includes(listing.reviewStatus);
-
-/** Tells admins a listing was held back because its price is far from the market. */
-const announceFlagged = (listing, poster) =>
-  notifyAdmins({
-    type: "listing_pending",
-    title: "Listing flagged for price review",
-    body: `${poster.name} (${poster.role}) listed ${listing.flowerVariety} at ₱${listing.pricePerUnit}/dozen, ${describeDeviation(listing.priceDeviationPercent)} the market price (₱${listing.marketVwapAtCheck})`,
-    listing: listing._id,
-  });
-
-/**
- * Runs the price check and sets the listing's review state: flagged ("pending") when the
- * price is too far from the VWAP, otherwise live ("approved"). Returns the check result.
- */
-async function applyPriceCheck(listing) {
-  const check = await checkListingPrice(listing.flowerVariety, listing.pricePerUnit);
-  listing.priceDeviationPercent = check.deviationPercent;
-  listing.marketVwapAtCheck = check.vwap;
-  listing.reviewStatus = check.flagged ? "pending" : "approved";
-  listing.reviewNote = undefined;
-  listing.reviewedBy = null;
-  listing.reviewedAt = null;
-  return check;
-}
-
-const flaggedMessage = (check) =>
-  `Your price is ${describeDeviation(check.deviationPercent)} the market price (₱${check.vwap} per dozen), so an admin will review this listing before it goes live.`;
 
 // Allow-list: only these sort keys are accepted from the query string.
 const SORTS = {
@@ -120,7 +89,7 @@ const createListing = async (req, res) => {
       await File.create({ _id: fileId, owner: req.user._id, kind: "listing", ...processed });
     }
 
-    const listing = new Listing({
+    const listing = await Listing.create({
       postedBy: req.user._id,
       type,
       flowerVariety,
@@ -130,16 +99,8 @@ const createListing = async (req, res) => {
       description,
       image: fileId,
     });
-    const check = await applyPriceCheck(listing);
-    await listing.save();
 
-    if (check.flagged) announceFlagged(listing, req.user);
-
-    res.status(201).json({
-      listing: shape(listing),
-      priceCheck: check,
-      message: check.flagged ? flaggedMessage(check) : "Your listing is live.",
-    });
+    res.status(201).json({ listing: shape(listing) });
   } catch (err) {
     if (fileId) await File.deleteOne({ _id: fileId }).catch(() => {}); // don't leave an orphaned photo
     if (err.name === "ValidationError") return res.status(400).json({ message: err.message });
@@ -151,8 +112,7 @@ const createListing = async (req, res) => {
 /**
  * @route   GET /api/listings
  * @desc    Query: type, flowerVariety, location, status, sort, page, limit.
- *          Listings flagged by the price check (pending) or rejected are left out. With mine=true (signed in), returns the
- *          caller's own listings in every review state; reviewStatus then narrows them.
+ *          mine=true (signed in) limits it to the caller's own listings.
  * @access  Public (mine=true needs a token)
  */
 const getListings = async (req, res) => {
@@ -167,14 +127,7 @@ const getListings = async (req, res) => {
     }
 
     const filter = {};
-    if (mine) {
-      filter.postedBy = req.user._id;
-      const { reviewStatus } = req.query;
-      if (reviewStatus === "approved") Object.assign(filter, Listing.LIVE_FILTER);
-      else if (["pending", "rejected"].includes(reviewStatus)) filter.reviewStatus = reviewStatus;
-    } else {
-      Object.assign(filter, Listing.LIVE_FILTER);
-    }
+    if (mine) filter.postedBy = req.user._id;
     if (type) filter.type = String(type);
     if (location) filter.location = String(location);
     if (status) filter.status = String(status);
@@ -206,7 +159,7 @@ const getListings = async (req, res) => {
 
 /**
  * @route   GET /api/listings/:id
- * @access  Public. A listing not yet approved is visible only to its poster and admins.
+ * @access  Public
  */
 const getListingById = async (req, res) => {
   try {
@@ -215,14 +168,6 @@ const getListingById = async (req, res) => {
       .lean();
 
     if (!row) return res.status(404).json({ message: "Listing not found" });
-
-    if (!isLive(row)) {
-      const viewer = req.user;
-      const isOwner = viewer && row.postedBy && String(row.postedBy._id) === String(viewer._id);
-      if (!isOwner && viewer?.role !== "admin") {
-        return res.status(404).json({ message: "Listing not found" });
-      }
-    }
 
     const [listing] = await attachMarketPrice([row]);
     res.json({ listing });
@@ -273,33 +218,14 @@ const updateListing = async (req, res) => {
       listing.image = null;
     }
 
-    // Re-run the price check when the price changes, or when a rejected listing is edited
-    // (that's how it gets resubmitted). Within range it goes live; too far off, it's flagged.
-    // Other edits (photo, description, quantity, status) never need admin review.
-    const edited = ["description", "pricePerUnit", "image", "quantity"].some((f) =>
-      listing.isModified(f)
-    );
-    const recheck =
-      listing.status === "active" &&
-      (listing.isModified("pricePerUnit") || (listing.reviewStatus === "rejected" && edited));
-    const wasFlagged = listing.reviewStatus === "pending";
-    const check = recheck ? await applyPriceCheck(listing) : null;
-
     await listing.save();
-
-    // Tell admins only when it newly lands in the queue.
-    if (check?.flagged && !wasFlagged) announceFlagged(listing, req.user);
 
     // Only delete the previous photo after the new state is safely saved.
     if (oldImage && String(oldImage) !== String(listing.image)) {
       await File.deleteOne({ _id: oldImage }).catch(() => {});
     }
 
-    res.json({
-      listing: shape(listing),
-      ...(check ? { priceCheck: check } : {}),
-      ...(check?.flagged ? { message: flaggedMessage(check) } : {}),
-    });
+    res.json({ listing: shape(listing) });
   } catch (err) {
     if (newFileId) await File.deleteOne({ _id: newFileId }).catch(() => {});
     if (err.name === "ValidationError") return res.status(400).json({ message: err.message });

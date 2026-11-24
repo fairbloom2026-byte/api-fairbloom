@@ -14,7 +14,6 @@ const notificationSchema = new mongoose.Schema(
     deal: ref("Deal"),
     transaction: ref("Transaction"),
     subject: ref("User"),
-    listing: ref("Listing"),
 
     count: { type: Number }, // how many messages were collapsed into this one (unset means 1)
     isRead: { type: Boolean, default: false },

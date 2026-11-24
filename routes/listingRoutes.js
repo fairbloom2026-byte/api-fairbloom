@@ -25,9 +25,9 @@ const imageLimiter = rateLimit({
   message: { message: "You're uploading photos too quickly. Please wait a few minutes." },
 });
 
-// Public, but a token lets owners see their own listings that are still awaiting review.
+// Public; a token is only needed for mine=true ("My listings").
 router.get("/", optionalAuth, getListings);
-router.get("/:id", optionalAuth, getListingById);
+router.get("/:id", getListingById);
 
 // uploadImage runs BEFORE the validators so multipart form fields are parsed first.
 router.post(

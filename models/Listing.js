@@ -52,32 +52,11 @@ const listingSchema = new mongoose.Schema(
       enum: ["active", "fulfilled", "cancelled"],
       default: "active",
     },
-
-    // Price check: a listing priced more than PRICE_DEVIATION_THRESHOLD_PERCENT above or below
-    // the variety's VWAP is flagged ("pending") and stays off the marketplace until an admin
-    // approves it. Everything else goes live at once ("approved").
-    reviewStatus: {
-      type: String,
-      enum: ["pending", "approved", "rejected"],
-      default: "approved",
-    },
-    // Signed % from the VWAP when last checked (positive = above). null = no price or no index.
-    priceDeviationPercent: { type: Number, default: null },
-    marketVwapAtCheck: { type: Number, default: null },
-    reviewNote: { type: String, trim: true, maxlength: 300 },
-    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
-    reviewedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
 
 // Supports the "Search and Filter" requirement: by flower type, location, status
 listingSchema.index({ flowerVariety: 1, location: 1, status: 1 });
-listingSchema.index({ reviewStatus: 1, createdAt: 1 });
-
-// Query fragment for listings the public may see: approved, or older listings with no review status.
-listingSchema.statics.LIVE_FILTER = Object.freeze({
-  reviewStatus: { $nin: ["pending", "rejected"] },
-});
 
 module.exports = mongoose.model("Listing", listingSchema);

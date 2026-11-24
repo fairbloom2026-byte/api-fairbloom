@@ -1,24 +1,5 @@
 const mongoose = require("mongoose");
 
-/**
- * Listings posted before admin moderation existed have no reviewStatus. They were already
- * live, so mark them approved once. Safe to run on every connect (it only touches unset rows).
- */
-async function backfillListingReview() {
-  try {
-    const { modifiedCount } = await mongoose.connection
-      .collection("listings")
-      .updateMany({ reviewStatus: { $exists: false } }, { $set: { reviewStatus: "approved" } });
-    if (modifiedCount) {
-      console.log(`[FairBloom] Marked ${modifiedCount} existing listing(s) as approved.`);
-    }
-  } catch (err) {
-    console.error("[FairBloom] Listing review backfill failed:", err.message);
-  }
-  // Lazy require: the model and price index load only after mongoose is connected.
-  await require("../utils/listingPriceCheck").recheckUnpricedPending();
-}
-
 const connectDB = async () => {
   const uri = process.env.MONGO_URI;
 
@@ -44,7 +25,6 @@ const connectDB = async () => {
     });
 
     console.log(`[FairBloom] MongoDB connected: ${conn.connection.host}`);
-    await backfillListingReview();
     return conn;
   } catch (err) {
     console.error("[FairBloom] MongoDB connection error:", err.message);
@@ -79,7 +59,6 @@ const ensureDB = () => {
     if (!process.env.MONGO_URI) return Promise.reject(new Error("MONGO_URI is not set"));
     pending = mongoose
       .connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 10000, family: 4 })
-      .then(backfillListingReview)
       .catch((err) => {
         pending = null;
         throw err;

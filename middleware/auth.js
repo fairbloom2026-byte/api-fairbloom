@@ -46,7 +46,7 @@ const authorize = (...allowedRoles) => {
 
 /**
  * Sets req.user when a valid token is sent, and carries on as a guest otherwise.
- * For public routes that show more to a signed-in owner or admin.
+ * For public routes that can also show the signed-in member their own data.
  */
 const optionalAuth = async (req, res, next) => {
   const authHeader = req.headers.authorization;
