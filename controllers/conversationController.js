@@ -8,6 +8,18 @@ const { getIO, isUserInRoom } = require("../utils/socket");
 const { processImage } = require("../utils/imageService");
 const { notify } = require("../utils/notify");
 
+// Trading is farmer <-> buyer only: farmers can't buy from or message other farmers,
+// and buyers can't message other buyers.
+const TRADER_ROLES = ["farmer", "buyer"];
+const SAME_ROLE_MESSAGE = "Farmers can only message buyers, and buyers can only message farmers";
+
+/** True when the conversation pairs exactly one farmer with one buyer. */
+async function isFarmerBuyerPair(conversation) {
+  const users = await User.find({ _id: { $in: conversation.participants } }).select("role");
+  const roles = users.map((u) => u.role).sort();
+  return roles.length === 2 && roles[0] === "buyer" && roles[1] === "farmer";
+}
+
 /**
  * @route   POST /api/conversations
  * @desc    Body: { recipientId, listingId? }
@@ -23,15 +35,22 @@ const startConversation = async (req, res) => {
     return res.status(400).json({ message: "You can't start a conversation with yourself" });
   }
 
+  if (!TRADER_ROLES.includes(req.user.role)) {
+    return res.status(403).json({ message: "Only farmers and buyers can start conversations" });
+  }
+
   try {
     const recipient = await User.findById(recipientId);
     if (
       !recipient ||
       !recipient.isActive ||
-      !["farmer", "buyer"].includes(recipient.role) ||
+      !TRADER_ROLES.includes(recipient.role) ||
       recipient.verificationStatus !== "approved"
     ) {
       return res.status(404).json({ message: "That user isn't available to chat" });
+    }
+    if (recipient.role === req.user.role) {
+      return res.status(403).json({ code: "SAME_ROLE", message: SAME_ROLE_MESSAGE });
     }
 
     let conversation = await Conversation.findOne({
@@ -137,6 +156,11 @@ const sendMessage = async (req, res) => {
       message: guardMessage,
     } = await assertParticipant(req.params.id, req.user._id);
     if (error) return res.status(error).json({ message: guardMessage });
+
+    // Older farmer-farmer / buyer-buyer chats (made before this rule) stay readable but closed.
+    if (!(await isFarmerBuyerPair(conversation))) {
+      return res.status(403).json({ code: "SAME_ROLE", message: SAME_ROLE_MESSAGE });
+    }
 
     let fileDoc = null;
     if (req.file) {
